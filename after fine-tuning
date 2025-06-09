@@ -1,0 +1,270 @@
+!pip install -q transformers datasets timm torchvision
+
+import torch
+import torchvision
+import timm
+from transformers import ViTFeatureExtractor, ViTForImageClassification
+from datasets import load_dataset
+
+print("All libraries imported successfully!")
+
+
+
+import torch
+from datasets import load_dataset
+from transformers import ViTForImageClassification, ViTFeatureExtractor, TrainingArguments, Trainer
+from torchvision.transforms import Compose, Resize, ToTensor, Normalize
+from PIL import Image
+import numpy as np
+
+# Check GPU availability
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+
+from google.colab import files
+files.upload()  # Upload your kaggle.json here
+
+
+
+!mkdir -p ~/.kaggle
+!cp kaggle.json ~/.kaggle/
+!chmod 600 ~/.kaggle/kaggle.json
+
+# Download the dataset
+!kaggle datasets download -d emmarex/plantdisease
+!unzip -q plantdisease.zip -d plantvillage
+
+
+import os
+
+# Check the structure of the extracted dataset
+os.listdir('plantvillage')
+
+
+print(os.listdir('plantvillage/PlantVillage'))
+
+
+
+from PIL import UnidentifiedImageError
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from sklearn.model_selection import train_test_split
+import os
+from PIL import Image
+
+# Define the transformation (resize, normalize, convert to tensor)
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Pretrained ViT mean/std
+])
+
+class PlantVillageDataset(Dataset):
+    def __init__(self, data_dir, transform=None):
+        self.data_dir = data_dir
+        self.transform = transform
+        self.image_paths = []
+        self.labels = []
+        self.class_names = os.listdir(data_dir)
+
+        # Loop through each class and find image paths
+        for label, class_name in enumerate(self.class_names):
+            class_dir = os.path.join(data_dir, class_name)
+            for img_name in os.listdir(class_dir):
+                img_path = os.path.join(class_dir, img_name)
+                try:
+                    # Check if the file is a valid image
+                    img = Image.open(img_path)
+                    img.verify()  # Verify the image is not corrupted
+                    self.image_paths.append(img_path)
+                    self.labels.append(label)
+                except (UnidentifiedImageError, IOError):
+                    print(f"Skipping invalid image: {img_path}")
+                    continue  # Skip invalid files
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        label = self.labels[idx]
+
+        # Load image
+        img = Image.open(img_path).convert("RGB")
+
+        if self.transform:
+            img = self.transform(img)
+
+        return img, label
+
+# Path to the extracted data
+data_dir = 'plantvillage/PlantVillage'
+
+# Load the full dataset and split into train and test sets
+dataset = PlantVillageDataset(data_dir=data_dir, transform=transform)
+
+print(f"Number of classes: {len(dataset.class_names)}")
+print("Class names:")
+print(dataset.class_names)
+
+# Split the dataset into training and test sets
+train_size = int(0.8 * len(dataset))
+test_size = len(dataset) - train_size
+train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+
+# DataLoader for batching
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+print(f"Loaded {len(train_loader.dataset)} training images and {len(test_loader.dataset)} test images.")
+
+
+
+from transformers import ViTForImageClassification
+from torch.optim import AdamW  # Corrected import
+import torch
+
+# Load the pre-trained ViT model
+model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224-in21k", num_labels=len(dataset.class_names))
+
+# Move the model to GPU (if available)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+# Define optimizer and loss function
+optimizer = AdamW(model.parameters(), lr=1e-5)
+loss_fn = torch.nn.CrossEntropyLoss()
+
+print("Model setup complete.")
+
+
+
+# Set device (GPU if available)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+# Training parameters
+epochs = 3  # You can increase this for more training
+best_accuracy = 0.0
+
+# Training loop
+for epoch in range(epochs):
+    model.train()
+    running_loss = 0.0
+    correct_predictions = 0
+    total_predictions = 0
+
+    for imgs, labels in train_loader:
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+
+        # Zero gradients
+        optimizer.zero_grad()
+
+        # Forward pass
+        outputs = model(imgs).logits
+        loss = loss_fn(outputs, labels)
+
+        # Backward pass
+        loss.backward()
+        optimizer.step()
+
+        # Calculate loss and accuracy
+        running_loss += loss.item()
+        _, preds = torch.max(outputs, dim=1)
+        correct_predictions += torch.sum(preds == labels).item()
+        total_predictions += labels.size(0)
+
+    epoch_loss = running_loss / len(train_loader)
+    epoch_accuracy = correct_predictions / total_predictions
+
+    print(f"Epoch {epoch+1}/{epochs}")
+    print(f"Train Loss: {epoch_loss:.4f}, Accuracy: {epoch_accuracy:.4f}")
+
+    # Save the best model based on accuracy
+    if epoch_accuracy > best_accuracy:
+        best_accuracy = epoch_accuracy
+        torch.save(model.state_dict(), "best_vit_model.pth")
+        print(f"Model saved with accuracy {epoch_accuracy:.4f}")
+
+# 🔍 Evaluate on the test set
+model.eval()  # Set model to evaluation mode
+correct = 0
+total = 0
+
+with torch.no_grad():
+    for imgs, labels in test_loader:
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+        outputs = model(imgs).logits
+        _, preds = torch.max(outputs, dim=1)
+        correct += (preds == labels).sum().item()
+        total += labels.size(0)
+
+test_accuracy = correct / total
+print(f"\n✅ Test Accuracy: {test_accuracy:.4f}")
+
+
+import os
+print(os.listdir())
+
+
+from google.colab import files
+files.download('best_vit_model.pth')
+
+
+
+from transformers import ViTForImageClassification
+from PIL import Image
+import torch
+from torchvision import transforms
+import os
+import matplotlib.pyplot as plt
+
+# 1. Set device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 2. Define the same transform
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225])
+])
+
+# 3. Load class names (make sure PlantVillage folder exists)
+class_names = os.listdir('plantvillage/PlantVillage')
+
+# 4. Load model and weights
+model = ViTForImageClassification.from_pretrained(
+    "google/vit-base-patch16-224-in21k",
+    num_labels=len(class_names)
+)
+model.load_state_dict(torch.load("best_vit_model.pth", map_location=device))
+model.to(device)
+model.eval()
+
+# 5. Upload image
+from google.colab import files
+uploaded = files.upload()
+
+# 6. Inference with visualization
+for filename in uploaded.keys():
+    # Load and preprocess image
+    img = Image.open(filename).convert("RGB")
+    img_tensor = transform(img).unsqueeze(0).to(device)
+
+    # Run inference
+    with torch.no_grad():
+        outputs = model(img_tensor).logits
+        probabilities = torch.nn.functional.softmax(outputs, dim=1)
+        predicted_idx = torch.argmax(probabilities, dim=1).item()
+        predicted_class = class_names[predicted_idx]
+        confidence = probabilities[0][predicted_idx].item() * 100
+
+    # Show image and prediction
+    plt.imshow(img)
+    plt.axis("off")
+    plt.title(f"Predicted: {predicted_class} ({confidence:.2f}%)")
+    plt.show()
